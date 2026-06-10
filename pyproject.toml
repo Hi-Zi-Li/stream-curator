@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stream-curator"
+version = "0.1.0"
+description = "Local-first personal feed curator for bilibili, zhihu, and xiaohongshu."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+]
+
+[project.scripts]
+stream-curator = "stream_curator.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stream_curator"]

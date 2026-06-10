@@ -1,0 +1,14 @@
+{
+  "name": "stream-curator-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop client shell for stream-curator.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "runtime:mirror": "powershell -ExecutionPolicy Bypass -File .\\scripts\\fetch-electron-runtime.ps1"
+  },
+  "devDependencies": {
+    "electron": "^42.3.3"
+  }
+}

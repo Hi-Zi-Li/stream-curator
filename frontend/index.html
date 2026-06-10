@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>stream-curator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary">
+        <div class="brand">SC</div>
+        <button class="nav-item is-active" type="button" aria-label="推送" title="推送">
+          <span class="nav-icon">⌂</span>
+        </button>
+        <button class="nav-item" type="button" aria-label="热门" title="热门" disabled>
+          <span class="nav-icon">◌</span>
+        </button>
+        <button class="nav-item" type="button" aria-label="搜索" title="搜索" disabled>
+          <span class="nav-icon">⌕</span>
+        </button>
+        <button class="nav-item nav-foot" type="button" aria-label="设置" title="设置" disabled>
+          <span class="nav-icon">⋯</span>
+        </button>
+      </aside>
+
+      <main class="workspace">
+        <header class="toolbar">
+          <div class="toolbar-copy">
+            <p id="status-line">正在准备推送…</p>
+            <p id="meta-line"></p>
+          </div>
+          <button class="refresh-button" id="refresh-button" type="button" aria-label="刷新" title="刷新">
+            ↻
+          </button>
+        </header>
+
+        <section class="card-grid" id="card-grid" aria-label="推送卡片"></section>
+
+        <section class="detail-panel" id="detail-panel" aria-label="详情">
+          <div class="detail-empty" id="detail-empty">等待第一批推送…</div>
+
+          <div class="detail-content is-hidden" id="detail-content">
+            <div class="detail-header">
+              <div class="detail-headline">
+                <div class="detail-meta-row">
+                  <span class="pill" id="detail-source"></span>
+                  <span class="pill pill-strong" id="detail-level"></span>
+                  <span class="detail-author" id="detail-author"></span>
+                </div>
+                <h2 id="detail-title"></h2>
+              </div>
+
+              <div class="detail-actions">
+                <button class="action-button action-primary" id="open-button" type="button">打开原文</button>
+                <button class="action-button" id="copy-button" type="button">复制链接</button>
+              </div>
+            </div>
+
+            <div class="label-row" id="detail-labels"></div>
+            <p class="detail-summary" id="detail-summary"></p>
+            <p class="detail-reason" id="detail-reason"></p>
+            <div class="detail-sections" id="detail-sections"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
