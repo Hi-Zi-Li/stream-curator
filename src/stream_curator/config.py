@@ -56,9 +56,24 @@ def get_settings() -> Settings:
         llm_fallback_model="",
         llm_timeout_seconds=int(os.getenv("STREAM_CURATOR_LLM_TIMEOUT_SECONDS", "35")),
         worker_poll_interval_seconds=int(os.getenv("STREAM_CURATOR_WORKER_POLL_INTERVAL_SECONDS", "30")),
-        bilibili_executable=os.getenv("STREAM_CURATOR_BILIBILI_EXECUTABLE", "E:\\Anaconda3\\envs\\streamcurator\\Scripts\\bili.exe"),
-        zhihu_executable=os.getenv("STREAM_CURATOR_ZHIHU_EXECUTABLE", "E:\\Anaconda3\\envs\\streamcurator\\Scripts\\zhihu.exe"),
-        xiaohongshu_executable=os.getenv("STREAM_CURATOR_XIAOHONGSHU_EXECUTABLE", "E:\\Anaconda3\\envs\\streamcurator\\Scripts\\xhs.exe"),
+        bilibili_executable=_resolve_source_executable(
+            project_root=project_root,
+            env_var_name="STREAM_CURATOR_BILIBILI_EXECUTABLE",
+            local_relative_path=Path("third-party") / "bin" / "bili.cmd",
+            fallback_path="E:\\Anaconda3\\envs\\streamcurator\\Scripts\\bili.exe",
+        ),
+        zhihu_executable=_resolve_source_executable(
+            project_root=project_root,
+            env_var_name="STREAM_CURATOR_ZHIHU_EXECUTABLE",
+            local_relative_path=Path("third-party") / "bin" / "zhihu.cmd",
+            fallback_path="E:\\Anaconda3\\envs\\streamcurator\\Scripts\\zhihu.exe",
+        ),
+        xiaohongshu_executable=_resolve_source_executable(
+            project_root=project_root,
+            env_var_name="STREAM_CURATOR_XIAOHONGSHU_EXECUTABLE",
+            local_relative_path=Path("third-party") / "bin" / "xhs.cmd",
+            fallback_path="E:\\Anaconda3\\envs\\streamcurator\\Scripts\\xhs.exe",
+        ),
     )
 
 
@@ -91,3 +106,19 @@ def _first_non_empty(*values: str | None) -> str | None:
         if text:
             return text
     return None
+
+
+def _resolve_source_executable(
+    *,
+    project_root: Path,
+    env_var_name: str,
+    local_relative_path: Path,
+    fallback_path: str,
+) -> str:
+    explicit_path = _read_text(os.getenv(env_var_name))
+    if explicit_path:
+        return explicit_path
+    local_path = project_root / local_relative_path
+    if local_path.exists():
+        return str(local_path)
+    return fallback_path

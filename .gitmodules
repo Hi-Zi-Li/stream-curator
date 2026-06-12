@@ -1,0 +1,9 @@
+[submodule "third-party/@bilibili-cli"]
+	path = third-party/@bilibili-cli
+	url = https://github.com/Hi-Zi-Li/bilibili-cli.git
+[submodule "third-party/@zhihu-cli"]
+	path = third-party/@zhihu-cli
+	url = https://github.com/Hi-Zi-Li/zhihu-cli.git
+[submodule "third-party/@xiaohongshu-cli"]
+	path = third-party/@xiaohongshu-cli
+	url = https://github.com/Hi-Zi-Li/xiaohongshu-cli.git

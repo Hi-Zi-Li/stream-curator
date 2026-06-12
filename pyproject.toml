@@ -17,3 +17,7 @@ stream-curator = "stream_curator.cli:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stream_curator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["third-party", "desktop", "data"]

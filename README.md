@@ -59,6 +59,7 @@ stream-curator/
   examples/                README 截图
   frontend/                前端页面与交互
   src/stream_curator/      后端逻辑
+  third-party/             三个上游 CLI fork 与本地 wrapper
   tests/                   当前仍保留的有效测试
 ```
 
@@ -69,17 +70,36 @@ stream-curator/
 1. 开发态：本地 Python + 本地三个上游 CLI + Electron
 2. 发布包：直接解压 `zip` 后运行 `stream-curator.exe`
 
+## 克隆仓库
+
+三个上游 CLI fork 以 submodule 的形式放在 `third-party/@...` 下。首次克隆推荐直接带上它们：
+
+```powershell
+git clone --recurse-submodules <your-stream-curator-repo>
+```
+
+如果主仓库已经 clone 完，再补一次：
+
+```powershell
+git submodule update --init --recursive
+```
+
 ## 开发环境要求
 
 - Windows
 - Python 3.11
 - Node.js
-- 三个上游 CLI 可执行文件
-  - `bili.exe`
-  - `zhihu.exe`
-  - `xhs.exe`
+- 已初始化的 `third-party/@bilibili-cli`
+- 已初始化的 `third-party/@zhihu-cli`
+- 已初始化的 `third-party/@xiaohongshu-cli`
 
-默认配置下，程序会优先寻找这三个可执行文件；如果你的路径不同，可以用环境变量覆盖：
+默认配置下，程序会优先走仓库内的本地 wrapper：
+
+- `third-party/bin/bili.cmd`
+- `third-party/bin/zhihu.cmd`
+- `third-party/bin/xhs.cmd`
+
+如果你想强制改成别的可执行文件，可以用环境变量覆盖：
 
 - `STREAM_CURATOR_BILIBILI_EXECUTABLE`
 - `STREAM_CURATOR_ZHIHU_EXECUTABLE`
@@ -92,6 +112,12 @@ stream-curator/
 ```powershell
 $env:PYTHONPATH = (Resolve-Path .\src)
 python -X utf8 -m stream_curator.cli bootstrap
+```
+
+如果你希望当前 Python 进程和三个本地 wrapper 共用同一个解释器，推荐显式加上：
+
+```powershell
+$env:STREAM_CURATOR_PYTHON_EXECUTABLE = (Get-Command python).Source
 ```
 
 读取当前推送页：
@@ -162,6 +188,13 @@ npm start
 - 应用内统一阅读页
 - 推送刷新、热门刷新、搜索 AI 整理状态展示
 
+桌面端解析上游 CLI 的顺序是：
+
+1. `STREAM_CURATOR_*_EXECUTABLE` 显式覆盖
+2. 发布包内置 wrapper
+3. 仓库内 `third-party/bin/*.cmd`
+4. 旧的外部 `Scripts/*.exe` 回退路径
+
 ## 登录设置
 
 推荐直接在桌面端里完成：
@@ -217,6 +250,7 @@ npm run build:portable
 - `desktop/dist/stream-curator-win32-x64/`
 
 这个版本仍然依赖你本机已有的 Python 环境和三个上游 CLI。
+如果你已经初始化了 `third-party` submodule，并且当前 Python 环境具备三个 CLI 的运行依赖，也可以直接走仓库内 wrapper。
 
 ### 自包含发布包
 
@@ -247,6 +281,12 @@ npm run build:release
 - `bilibili-cli`
 - `zhihu-cli`
 - `xiaohongshu-cli`
+
+现在这三个 fork 已经作为 submodule 挂在：
+
+- `third-party/@bilibili-cli`
+- `third-party/@zhihu-cli`
+- `third-party/@xiaohongshu-cli`
 
 本仓库只负责统一调度、缓存、LLM 整理、桌面端展示和阅读体验。
 

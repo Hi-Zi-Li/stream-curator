@@ -19,6 +19,12 @@ npm start
 ```
 
 默认情况下，桌面端会去调用项目里的 Python 后端和三个上游 CLI。
+默认解析顺序是：
+
+1. `STREAM_CURATOR_*_EXECUTABLE` 显式覆盖
+2. 发布包里的 `runtime/bin/*.cmd`
+3. 仓库内 `third-party/bin/*.cmd`
+4. 旧的外部 `Scripts/*.exe` 回退路径
 
 如果你的环境路径不同，可以覆盖：
 
@@ -42,6 +48,7 @@ npm run build:portable
 - `desktop/dist/stream-curator-win32-x64/`
 
 这个版本继续使用你本机已有的 Python 环境和上游 CLI。
+如果你已经初始化了 `third-party` submodule，也可以直接走仓库内 wrapper。
 
 ### 自包含发布包
 

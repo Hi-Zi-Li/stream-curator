@@ -14,6 +14,7 @@ const APP_ICON_PATH = resolveAppIconPath();
 const RELEASE_MARKER_PATH = path.join(PROJECT_ROOT, ".portable-release");
 const BUNDLED_ENV_ROOT = path.join(PROJECT_ROOT, "runtime", "streamcurator-env");
 const BUNDLED_BIN_ROOT = path.join(PROJECT_ROOT, "runtime", "bin");
+const THIRD_PARTY_BIN_ROOT = path.join(PROJECT_ROOT, "third-party", "bin");
 const APP_SETTINGS_FILE_NAME = "app-settings.json";
 const DEFAULT_LLM_CHAT_COMPLETIONS_URL = "https://opencode.ai/zen/go/v1/chat/completions";
 const DEFAULT_LLM_MODEL = "deepseek-v4-flash";
@@ -27,18 +28,21 @@ const BILIBILI_CREDENTIAL_PATH = path.join(os.homedir(), ".bilibili-cli", "crede
 const ZHIHU_COOKIE_PATH = path.join(os.homedir(), ".zhihu-cli", "cookies.json");
 const XIAOHONGSHU_COOKIE_PATH = path.join(os.homedir(), ".xiaohongshu-cli", "cookies.json");
 const SOURCE_EXECUTABLES = {
-  bilibili: resolveBundledExecutable({
+  bilibili: resolveSourceExecutable({
     explicitPath: process.env.STREAM_CURATOR_BILIBILI_EXECUTABLE,
+    localPath: path.join(THIRD_PARTY_BIN_ROOT, "bili.cmd"),
     bundledPath: path.join(BUNDLED_BIN_ROOT, "bili.cmd"),
     fallbackPath: "E:\\Anaconda3\\envs\\streamcurator\\Scripts\\bili.exe",
   }),
-  zhihu: resolveBundledExecutable({
+  zhihu: resolveSourceExecutable({
     explicitPath: process.env.STREAM_CURATOR_ZHIHU_EXECUTABLE,
+    localPath: path.join(THIRD_PARTY_BIN_ROOT, "zhihu.cmd"),
     bundledPath: path.join(BUNDLED_BIN_ROOT, "zhihu.cmd"),
     fallbackPath: "E:\\Anaconda3\\envs\\streamcurator\\Scripts\\zhihu.exe",
   }),
-  xiaohongshu: resolveBundledExecutable({
+  xiaohongshu: resolveSourceExecutable({
     explicitPath: process.env.STREAM_CURATOR_XIAOHONGSHU_EXECUTABLE,
+    localPath: path.join(THIRD_PARTY_BIN_ROOT, "xhs.cmd"),
     bundledPath: path.join(BUNDLED_BIN_ROOT, "xhs.cmd"),
     fallbackPath: "E:\\Anaconda3\\envs\\streamcurator\\Scripts\\xhs.exe",
   }),
@@ -92,6 +96,20 @@ function resolveBundledExecutable({ explicitPath, bundledPath, fallbackPath }) {
   }
   if (bundledPath && fs.existsSync(bundledPath)) {
     return bundledPath;
+  }
+  return fallbackPath;
+}
+
+function resolveSourceExecutable({ explicitPath, localPath, bundledPath, fallbackPath }) {
+  const preferred = String(explicitPath || "").trim();
+  if (preferred) {
+    return preferred;
+  }
+  if (bundledPath && fs.existsSync(bundledPath)) {
+    return bundledPath;
+  }
+  if (localPath && fs.existsSync(localPath)) {
+    return localPath;
   }
   return fallbackPath;
 }

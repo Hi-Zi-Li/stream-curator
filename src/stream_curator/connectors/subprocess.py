@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,7 @@ class SubprocessRunner:
         env = os.environ.copy()
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("STREAM_CURATOR_PYTHON_EXECUTABLE", sys.executable)
         kwargs: dict[str, Any] = {}
         if os.name == "nt":
             startupinfo = subprocess.STARTUPINFO()
