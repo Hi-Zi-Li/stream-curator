@@ -41,6 +41,61 @@ class BilibiliConnector(BaseConnector):
             if isinstance(entry, dict) and entry.get("bvid")
         ]
 
+    def collect_hot(self, *, limit: int = 10) -> list[CollectedItem]:
+        result = self._runner.run(
+            [
+                self._executable,
+                "hot",
+                "--max",
+                str(limit),
+                "--json",
+            ]
+        )
+        payload = result.json()
+        items = payload.get("data", {}).get("items", [])
+        return [
+            CollectedItem(
+                rank_in_batch=index,
+                raw_payload=entry,
+                feed_item=_map_video_item(entry, collected_at=_now_iso(), channel="hot"),
+            )
+            for index, entry in enumerate(items, start=1)
+            if isinstance(entry, dict) and entry.get("bvid")
+        ]
+
+    def collect_search(self, *, query: str, limit: int = 10) -> list[CollectedItem]:
+        keyword = str(query or "").strip()
+        if not keyword:
+            return []
+        result = self._runner.run(
+            [
+                self._executable,
+                "search",
+                keyword,
+                "--type",
+                "video",
+                "-n",
+                str(limit),
+                "--json",
+            ]
+        )
+        payload = result.json()
+        items = payload.get("data", []) if isinstance(payload.get("data"), list) else []
+        return [
+            CollectedItem(
+                rank_in_batch=index,
+                raw_payload=entry,
+                feed_item=_map_video_item(
+                    _normalize_search_video(entry),
+                    collected_at=_now_iso(),
+                    channel="search",
+                    query=keyword,
+                ),
+            )
+            for index, entry in enumerate(items, start=1)
+            if isinstance(entry, dict) and entry.get("bvid")
+        ][:limit]
+
     def hydrate_item(self, item: CollectedItem) -> CollectedItem:
         if not item.feed_item.source_item_id:
             return item
@@ -65,7 +120,13 @@ class BilibiliConnector(BaseConnector):
         )
 
 
-def _map_video_item(entry: dict[str, Any], *, collected_at: str, channel: str) -> FeedItem:
+def _map_video_item(
+    entry: dict[str, Any],
+    *,
+    collected_at: str,
+    channel: str,
+    query: str | None = None,
+) -> FeedItem:
     bvid = str(entry.get("bvid", "")).strip()
     owner = entry.get("owner", {}) if isinstance(entry.get("owner"), dict) else {}
     stats = entry.get("stats", {}) if isinstance(entry.get("stats"), dict) else {}
@@ -104,6 +165,9 @@ def _map_video_item(entry: dict[str, Any], *, collected_at: str, channel: str) -
         media={
             "has_video": True,
             "duration_seconds": _safe_int(entry.get("duration_seconds")),
+            "aid": _safe_int(entry.get("aid")),
+            "cid": _safe_int(entry.get("cid")),
+            "page_number": _safe_int(entry.get("page")) or 1,
             "image_count": None,
         },
         quality_flags={
@@ -113,6 +177,7 @@ def _map_video_item(entry: dict[str, Any], *, collected_at: str, channel: str) -
             "is_from_following": False,
             "is_ad_suspected": False,
         },
+        query_text=query,
     )
 
 
@@ -134,6 +199,7 @@ def _map_hydrated_video_item(payload: dict[str, Any], *, fallback: FeedItem) -> 
         source_item_id=fallback.source_item_id,
         canonical_url=str(video.get("url", "")).strip() or fallback.canonical_url,
         collection_channel=fallback.collection_channel,
+        query_text=fallback.query_text,
         title=str(video.get("title", "")).strip() or fallback.title,
         author=FeedAuthor(
             id=_string_or_none(owner.get("id")) or fallback.author.id,
@@ -161,6 +227,9 @@ def _map_hydrated_video_item(payload: dict[str, Any], *, fallback: FeedItem) -> 
         media={
             "has_video": True,
             "duration_seconds": _safe_int(video.get("duration_seconds")) or fallback.media.get("duration_seconds"),
+            "aid": _safe_int(video.get("aid")) or fallback.media.get("aid"),
+            "cid": _safe_int(video.get("cid")) or fallback.media.get("cid"),
+            "page_number": _safe_int(video.get("page")) or fallback.media.get("page_number") or 1,
             "image_count": fallback.media.get("image_count"),
         },
         quality_flags={
@@ -200,3 +269,39 @@ def _string_or_none(value: Any) -> str | None:
 
 def _now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _normalize_search_video(entry: dict[str, Any]) -> dict[str, Any]:
+    bvid = str(entry.get("bvid") or entry.get("id") or "").strip()
+    return {
+        "bvid": bvid,
+        "title": str(entry.get("title", "")).strip(),
+        "description": "",
+        "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
+        "duration_seconds": _duration_text_to_seconds(entry.get("duration")),
+        "owner": {
+            "id": None,
+            "name": str(entry.get("author", "")).strip(),
+        },
+        "stats": {
+            "view": _safe_int(entry.get("play")),
+            "danmaku": None,
+            "like": None,
+            "coin": None,
+            "favorite": None,
+            "share": None,
+        },
+    }
+
+
+def _duration_text_to_seconds(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if not all(part.isdigit() for part in parts):
+        return None
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total

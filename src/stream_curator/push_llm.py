@@ -19,6 +19,7 @@ class PushCandidate:
     canonical_url: str
     excerpt: str
     stats_text: str
+    reader_payload: dict[str, Any]
 
 
 @dataclass(slots=True)

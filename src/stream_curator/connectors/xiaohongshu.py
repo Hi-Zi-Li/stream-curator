@@ -40,6 +40,54 @@ class XiaohongshuConnector(BaseConnector):
         ]
         return collected[:limit]
 
+    def collect_hot(self, *, limit: int = 10) -> list[CollectedItem]:
+        result = self._runner.run(
+            [
+                self._executable,
+                "hot",
+                "--json",
+            ]
+        )
+        payload = result.json()
+        items = payload.get("data", {}).get("items", [])
+        collected = [
+            CollectedItem(
+                rank_in_batch=index,
+                raw_payload=entry,
+                feed_item=_map_note_item(entry, collected_at=_now_iso(), channel="hot"),
+            )
+            for index, entry in enumerate(items, start=1)
+            if _is_note_item(entry)
+        ]
+        return collected[:limit]
+
+    def collect_search(self, *, query: str, limit: int = 10) -> list[CollectedItem]:
+        keyword = str(query or "").strip()
+        if not keyword:
+            return []
+        result = self._runner.run(
+            [
+                self._executable,
+                "search",
+                keyword,
+                "--page",
+                "1",
+                "--json",
+            ]
+        )
+        payload = result.json()
+        items = payload.get("data", {}).get("items", [])
+        collected = [
+            CollectedItem(
+                rank_in_batch=index,
+                raw_payload=entry,
+                feed_item=_map_note_item(entry, collected_at=_now_iso(), channel="search", query=keyword),
+            )
+            for index, entry in enumerate(items, start=1)
+            if _is_note_item(entry)
+        ]
+        return collected[:limit]
+
     def hydrate_item(self, item: CollectedItem) -> CollectedItem:
         note_ref = item.feed_item.canonical_url or item.feed_item.source_item_id
         if not note_ref:
@@ -133,6 +181,7 @@ def _map_note_item(
             "has_video": has_video,
             "duration_seconds": duration_seconds,
             "image_count": len(image_list) if image_list else (_safe_int(cover.get("image_count")) or 1),
+            "image_urls": _extract_image_urls(image_list),
         },
         quality_flags={
             "has_transcript": False,
@@ -151,6 +200,7 @@ def _map_hydrated_note_item(payload: dict[str, Any], *, fallback: FeedItem) -> F
     body = str(note.get("body", "")).strip()
     title = str(note.get("title", "")).strip()
     tags = note.get("tags", []) if isinstance(note.get("tags"), list) else []
+    image_urls = _normalize_image_urls(note.get("images"))
     top_comments = [_map_comment(comment) for comment in comments if isinstance(comment, dict)]
 
     return FeedItem(
@@ -189,7 +239,8 @@ def _map_hydrated_note_item(payload: dict[str, Any], *, fallback: FeedItem) -> F
         media={
             "has_video": str(note.get("note_type", "")).strip() == "video" or bool(fallback.media.get("has_video")),
             "duration_seconds": fallback.media.get("duration_seconds"),
-            "image_count": _safe_int(note.get("image_count")) or fallback.media.get("image_count"),
+            "image_count": _safe_int(note.get("image_count")) or len(image_urls) or fallback.media.get("image_count"),
+            "image_urls": image_urls or _normalize_image_urls(fallback.media.get("image_urls")),
         },
         quality_flags={
             "has_transcript": False,
@@ -216,6 +267,61 @@ def _canonical_note_url(note_id: str, xsec_token: str) -> str:
             f"?xsec_token={xsec_token}&xsec_source=pc_search"
         )
     return f"https://www.xiaohongshu.com/explore/{note_id}"
+
+
+def _extract_image_urls(image_list: list[Any]) -> list[str]:
+    urls: list[str] = []
+    for image in image_list:
+        if not isinstance(image, dict):
+            continue
+        url = _first_non_empty(
+            image.get("url_default"),
+            image.get("url_pre"),
+            image.get("url"),
+        )
+        if not url:
+            info_list = image.get("info_list", [])
+            if isinstance(info_list, list):
+                for info in info_list:
+                    if not isinstance(info, dict):
+                        continue
+                    url = _first_non_empty(info.get("url"))
+                    if url:
+                        break
+        normalized = _normalize_media_url(url)
+        if normalized and normalized not in urls:
+            urls.append(normalized)
+    return urls
+
+
+def _normalize_image_urls(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    urls: list[str] = []
+    for item in value:
+        normalized = _normalize_media_url(item)
+        if normalized and normalized not in urls:
+            urls.append(normalized)
+    return urls
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_media_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return f"https:{text}"
+    if text.startswith("http://"):
+        return "https://" + text[len("http://"):]
+    return text
 
 
 def _compact_count_to_int(value: Any) -> int | None:

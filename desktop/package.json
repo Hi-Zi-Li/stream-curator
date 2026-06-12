@@ -6,9 +6,12 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "runtime:mirror": "powershell -ExecutionPolicy Bypass -File .\\scripts\\fetch-electron-runtime.ps1"
+    "runtime:mirror": "powershell -ExecutionPolicy Bypass -File .\\scripts\\fetch-electron-runtime.ps1",
+    "build:portable": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-portable.ps1",
+    "build:release": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build-release.ps1"
   },
   "devDependencies": {
-    "electron": "^42.3.3"
+    "electron": "^42.3.3",
+    "rcedit": "^5.0.2"
   }
 }

@@ -8,7 +8,16 @@ import json
 import time
 
 from .config import Settings
-from .push_service import PUSH_CARD_COUNT, READY_CARD_TARGET, create_store, fill_ready_queue_once
+from .hot_service import ensure_hot_cache
+from .push_service import (
+    HYDRATED_POOL_TARGET,
+    PUSH_CARD_COUNT,
+    READY_CARD_TARGET,
+    create_store,
+    fill_ready_queue_once,
+    fill_hydrated_pool_once,
+    repair_cached_reader_payloads,
+)
 
 
 @dataclass(slots=True)
@@ -33,6 +42,7 @@ def run_worker_once(*, settings: Settings) -> WorkerCycleSummary:
     started_at = _now_iso()
     started = time.perf_counter()
     store = create_store(settings)
+    repair_cached_reader_payloads(settings=settings, store=store, ready_limit=READY_CARD_TARGET)
     ready_before = store.count_ready_cards()
     current_page = store.load_current_page()
     if current_page is None and ready_before >= PUSH_CARD_COUNT:
@@ -48,6 +58,8 @@ def run_worker_once(*, settings: Settings) -> WorkerCycleSummary:
         if should_fill:
             result = fill_ready_queue_once(settings=settings, store=store)
             error_text = result.error
+        if store.count_hydrated_candidates() < HYDRATED_POOL_TARGET:
+            fill_hydrated_pool_once(settings=settings, store=store)
         if current_page is None and store.count_ready_cards() >= PUSH_CARD_COUNT:
             current_page = store.promote_next_ready_page(
                 limit=PUSH_CARD_COUNT,
@@ -55,6 +67,12 @@ def run_worker_once(*, settings: Settings) -> WorkerCycleSummary:
             )
     except Exception as exc:
         error_text = str(exc)
+
+    try:
+        ensure_hot_cache(settings=settings, store=store, force=False)
+    except Exception as exc:
+        if not error_text:
+            error_text = f"hot cache refresh failed: {exc}"
 
     store = create_store(settings)
     current_ready = store.load_current_page() is not None

@@ -242,7 +242,10 @@ def _worker_environment(project_root: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
-    src_dir = project_root / "src"
+    env["STREAM_CURATOR_PROJECT_ROOT"] = str(project_root)
+    source_root = Path(env.get("STREAM_CURATOR_SOURCE_ROOT") or project_root)
+    env["STREAM_CURATOR_SOURCE_ROOT"] = str(source_root)
+    src_dir = source_root / "src"
     if src_dir.exists():
         existing_pythonpath = env.get("PYTHONPATH", "")
         if existing_pythonpath:

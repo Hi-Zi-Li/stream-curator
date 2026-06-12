@@ -21,5 +21,11 @@ class BaseConnector:
     def collect_feed(self, **kwargs: Any) -> list[CollectedItem]:
         raise NotImplementedError
 
+    def collect_search(self, **kwargs: Any) -> list[CollectedItem]:
+        raise NotImplementedError
+
+    def collect_hot(self, **kwargs: Any) -> list[CollectedItem]:
+        return self.collect_feed(**kwargs)
+
     def hydrate_item(self, item: CollectedItem) -> CollectedItem:
         return item

@@ -1,79 +1,142 @@
 # stream-curator
 
-`stream-curator` is now a minimal push-only desktop client.
+<p align="center">
+  <img src="desktop/assets/app-icon.png" alt="stream-curator icon" width="112" />
+</p>
 
-Current live path:
+`stream-curator` 是一个给个人使用的桌面端信息筛选应用。  
+当前接入 `Bilibili`、`知乎`、`小红书` 三源，把首页推荐、热门和搜索结果整理成一个统一客户端：先抓取原始内容，再补正文，再交给 LLM 做摘要、筛选和整理，最后在应用内阅读。
 
-1. collect shallow feed candidates from `bilibili`, `zhihu`, `xiaohongshu`
-2. send candidates to one LLM selection request
-3. store push snapshots in SQLite as `current` and `warm`
-4. render a 2x3 push homepage in the Electron client
-5. refresh by promoting the next warm snapshot instantly
+## 当前功能
 
-There is no old stage1/stage2/stage3 pipeline in the active app anymore.
+### 1. 推送
 
-## Repository Shape
+- 从三源抓取首页推荐内容
+- 对候选条目做 hydrate，尽量补齐正文、简介、字幕、回答、笔记正文、少量评论
+- 交给 LLM 生成推送卡片：标题、摘要、推荐理由、标签
+- 首页一次展示 6 张卡片
+- 刷新优先读取已经缓存好的内容，缓存不足时后台 worker 继续补
+
+### 2. 热门
+
+- 三源分别抓取热门内容
+- 热门页缓存按小时刷新
+- 不做和推送完全一样的强筛选，更偏向“当前值得扫一眼的内容汇总”
+
+### 3. 搜索
+
+- 先返回即时搜索结果
+- 后台再跑一轮 AI 整理
+- 顶部显示“AI 整理中 / AI 整理完成”
+- LLM 会输出长摘要和分组结果，尽量去掉过时或不相关项
+
+### 4. 统一阅读页
+
+- `Bilibili`：应用内播放器 + 简介 + 评论分页
+- `知乎`：支持 question / answer / article，question 会在阅读页里切换多个回答
+- `小红书`：正文、图片、评论分页
+- 阅读页和卡片页共用一个客户端，不需要来回切浏览器
+
+## 页面示意
+
+### 推送页
+
+![推送页](examples/recommend.png)
+
+### 热门页
+
+![热门页](examples/hot.png)
+
+### 搜索页
+
+![搜索页](examples/search.png)
+
+## 仓库结构
 
 ```text
 stream-curator/
-  desktop/
-  frontend/
-  src/stream_curator/
-    cli.py
-    config.py
-    logging.py
-    push_llm.py
-    push_service.py
-    push_store.py
-    push_worker.py
-    worker_process.py
-    connectors/
-    models/
-  tests/
+  desktop/                 Electron 外壳与打包脚本
+  examples/                README 截图
+  frontend/                前端页面与交互
+  src/stream_curator/      后端逻辑
+  tests/                   当前仍保留的有效测试
 ```
 
-## Runtime Requirements
+## 运行方式
 
+推荐分两种方式使用：
+
+1. 开发态：本地 Python + 本地三个上游 CLI + Electron
+2. 发布包：直接解压 `zip` 后运行 `stream-curator.exe`
+
+## 开发环境要求
+
+- Windows
 - Python 3.11
-- `bili.exe`
-- `zhihu.exe`
-- `xhs.exe`
-- Electron runtime in `desktop/node_modules/electron`
-- `OPENCODE_API_KEY` in the environment
+- Node.js
+- 三个上游 CLI 可执行文件
+  - `bili.exe`
+  - `zhihu.exe`
+  - `xhs.exe`
 
-Default provider settings:
+默认配置下，程序会优先寻找这三个可执行文件；如果你的路径不同，可以用环境变量覆盖：
 
-- URL: `https://opencode.ai/zen/go/v1/chat/completions`
-- model: `deepseek-v4-flash`
+- `STREAM_CURATOR_BILIBILI_EXECUTABLE`
+- `STREAM_CURATOR_ZHIHU_EXECUTABLE`
+- `STREAM_CURATOR_XIAOHONGSHU_EXECUTABLE`
 
-## CLI
+## CLI 用法
 
-Bootstrap SQLite:
+先初始化 SQLite：
 
 ```powershell
-$env:PYTHONPATH="F:\Games\KimKitsuragi\stream-curator\src"
+$env:PYTHONPATH = (Resolve-Path .\src)
 python -X utf8 -m stream_curator.cli bootstrap
 ```
 
-Read the current push page:
+读取当前推送页：
 
 ```powershell
 python -X utf8 -m stream_curator.cli client push
 ```
 
-Promote the next warm snapshot:
+刷新推送页：
 
 ```powershell
 python -X utf8 -m stream_curator.cli client push --refresh
 ```
 
-Run one worker cycle:
+读取热门页：
+
+```powershell
+python -X utf8 -m stream_curator.cli client hot
+```
+
+刷新热门页：
+
+```powershell
+python -X utf8 -m stream_curator.cli client hot --refresh
+```
+
+执行一次搜索：
+
+```powershell
+python -X utf8 -m stream_curator.cli client search "agent"
+```
+
+强制重跑该搜索的 AI 整理：
+
+```powershell
+python -X utf8 -m stream_curator.cli client search-review "agent" --force
+```
+
+运行一次后台 worker：
 
 ```powershell
 python -X utf8 -m stream_curator.cli worker once
 ```
 
-Run the background worker:
+常驻后台 worker：
 
 ```powershell
 python -X utf8 -m stream_curator.cli worker start
@@ -81,27 +144,124 @@ python -X utf8 -m stream_curator.cli worker status
 python -X utf8 -m stream_curator.cli worker stop
 ```
 
-## Desktop Client
+## Desktop 用法
 
-Start the Electron shell:
+启动桌面端：
 
 ```powershell
 cd desktop
+npm install
 npm start
 ```
 
-The desktop app:
+桌面端当前提供：
 
-- reads preheated SQLite snapshots first
-- falls back to background preheat when the cache is cold
-- shows 6 push cards on the homepage
-- opens the original URL externally
-- refreshes by consuming the next warm snapshot
+- 推送 / 热门 / 搜索 三个主视图
+- 左下角设置页
+- 应用内登录页
+- 应用内统一阅读页
+- 推送刷新、热门刷新、搜索 AI 整理状态展示
 
-## Tests
+## 登录设置
 
-The remaining tests only cover active modules:
+推荐直接在桌面端里完成：
 
-- connector mapping
-- push snapshot storage/promotion
-- worker process start/stop state handling
+1. 启动客户端
+2. 点击左下角设置
+3. 选择 `Bilibili / 知乎 / 小红书`
+4. 在应用内打开对应登录页
+5. 完成登录后点击“保存登录”
+
+说明：
+
+- 登录状态最终仍然落在三个上游 CLI 各自使用的本地会话里
+- 桌面端的职责是把登录页嵌进来，并提交当前登录上下文
+- 如果你已经手动用上游 CLI 登录过，客户端也会读取到对应状态
+
+## LLM 设置
+
+同样在桌面端设置页完成：
+
+- `API URL`
+- `Model`
+- `API Key`
+
+当前默认值：
+
+- URL: `https://opencode.ai/zen/go/v1/chat/completions`
+- Model: `deepseek-v4-flash`
+
+说明：
+
+- `API Key` 在界面里是隐藏输入
+- 配置会保存到 `data/app-settings.json`
+- 也可以用环境变量覆盖：
+  - `STREAM_CURATOR_LLM_API_KEY`
+  - `STREAM_CURATOR_LLM_CHAT_COMPLETIONS_URL`
+  - `STREAM_CURATOR_LLM_MODEL`
+  - `OPENCODE_API_KEY`
+
+优先级上，显式的 `STREAM_CURATOR_*` 环境变量高于本地设置文件。
+
+## 打包
+
+### 便携目录
+
+```powershell
+cd desktop
+npm run build:portable
+```
+
+输出目录：
+
+- `desktop/dist/stream-curator-win32-x64/`
+
+这个版本仍然依赖你本机已有的 Python 环境和三个上游 CLI。
+
+### 自包含发布包
+
+```powershell
+cd desktop
+npm run build:release
+```
+
+输出文件：
+
+- `desktop/dist/stream-curator-release.zip`
+
+这个压缩包会带上：
+
+- Electron runtime
+- 精简后的 Python runtime
+- `stream-curator` 源码
+- 三个上游 CLI 的可执行包装
+- 应用图标和 exe 图标
+
+解压后直接运行 `stream-curator.exe` 即可。  
+外部仍需你自己提供有效的登录状态和 LLM 配置。
+
+## 当前依赖的上游项目
+
+`stream-curator` 依赖三套独立 CLI 做抓取与登录态承载：
+
+- `bilibili-cli`
+- `zhihu-cli`
+- `xiaohongshu-cli`
+
+本仓库只负责统一调度、缓存、LLM 整理、桌面端展示和阅读体验。
+
+## 测试
+
+当前测试只保留仍然和现有功能对应的部分，主要覆盖：
+
+- connector 映射
+- push / hot / search 核心服务
+- SQLite 存储
+- worker 进程状态
+- 阅读页评论分页
+
+运行：
+
+```powershell
+pytest
+```

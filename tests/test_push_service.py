@@ -37,7 +37,14 @@ def _candidate(item_uid: str, *, title: str) -> PushCandidate:
         author_name="tester",
         canonical_url=f"https://example.com/{item_uid}",
         excerpt=f"{title} excerpt",
-        stats_text="赞同 12",
+        stats_text="votes 12",
+        reader_payload={
+            "source": "zhihu",
+            "entityType": "answer",
+            "bodyText": f"{title} full body",
+            "transcriptText": "",
+            "comments": [],
+        },
     )
 
 
@@ -49,7 +56,7 @@ def test_fill_ready_queue_only_enqueues_valid_cards_and_saves_retry(monkeypatch,
 
     monkeypatch.setattr(
         "stream_curator.push_service.collect_push_candidates",
-        lambda settings, source_limit=20: ([first, second], {"zhihu": 2}, {}),
+        lambda settings, source_limit=20, store=None: ([first, second], {"zhihu": 2}, {}),
     )
     monkeypatch.setattr(
         "stream_curator.push_service.PushLlmClient.select_push_cards",
@@ -58,15 +65,15 @@ def test_fill_ready_queue_only_enqueues_valid_cards_and_saves_retry(monkeypatch,
                 PushCardDraft(
                     item_uid=first.item_uid,
                     recommendation="must_read",
-                    summary="这条回答拆解了 GPU 训练时最关键的瓶颈与取舍，适合快速补课。",
-                    reason="训练问题讲得更透",
-                    tags=["AI", "训练"],
+                    summary="A concise Chinese summary that should be treated as valid output.",
+                    reason="Good practical breakdown",
+                    tags=["AI", "Training"],
                     is_valid=True,
                 ),
                 PushCardDraft(
                     item_uid=second.item_uid,
                     recommendation="worth_reading",
-                    summary="Agent workflow",
+                    summary="Fallback summary",
                     reason="fallback",
                     tags=["AI"],
                     is_valid=False,
@@ -84,6 +91,47 @@ def test_fill_ready_queue_only_enqueues_valid_cards_and_saves_retry(monkeypatch,
     assert result.retry_count == 1
     assert store.count_ready_cards() == 1
     assert [entry["item_uid"] for entry in store.load_retry_candidates()] == [second.item_uid]
+
+
+def test_fill_ready_queue_recycles_unselected_candidates_into_hydrated_pool(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    store = create_store(settings)
+    first = _candidate("zhihu:answer:1", title="GPU training")
+    second = _candidate("zhihu:answer:2", title="Agent workflow")
+    store.enqueue_hydrated_candidates([first, second])
+
+    monkeypatch.setattr(
+        "stream_curator.push_service.collect_push_candidates",
+        lambda settings, source_limit=20, store=None: ([], {}, {}),
+    )
+    monkeypatch.setattr(
+        "stream_curator.push_service.PushLlmClient.select_push_cards",
+        lambda self, candidates, limit: PushSelectionResult(
+            cards=[
+                PushCardDraft(
+                    item_uid=first.item_uid,
+                    recommendation="must_read",
+                    summary="A concise Chinese summary that should be treated as valid output.",
+                    reason="Good practical breakdown",
+                    tags=["AI", "Training"],
+                    is_valid=True,
+                )
+            ],
+            provider="chat_completions",
+            model="deepseek-v4-flash",
+            used_fallback=False,
+        ),
+    )
+
+    result = fill_ready_queue_once(settings=settings, store=store, select_limit=1)
+
+    assert result.enqueued_count == 1
+    assert result.retry_count == 0
+    assert store.count_ready_cards() == 1
+    assert store.count_hydrated_candidates() == 1
+    assert [candidate.item_uid for candidate in store.peek_hydrated_candidates(limit=10)] == [second.item_uid]
 
 
 def test_get_push_page_payload_promotes_from_ready_queue(monkeypatch, tmp_path: Path) -> None:
@@ -109,8 +157,16 @@ def test_get_push_page_payload_promotes_from_ready_queue(monkeypatch, tmp_path: 
                 "excerpt": "excerpt",
                 "recommendation": "must_read",
                 "tags": ["AI"],
+                "reader_payload": {
+                    "source": "zhihu",
+                    "entityType": "answer",
+                    "bodyText": f"body-{index}",
+                    "transcriptText": "",
+                    "comments": [],
+                },
             }
         )
+
     from stream_curator.push_store import PushCard
 
     store.enqueue_ready_cards([PushCard(**card) for card in cards])
@@ -120,6 +176,7 @@ def test_get_push_page_payload_promotes_from_ready_queue(monkeypatch, tmp_path: 
     assert len(payload["items"]) == 6
     assert payload["meta"]["cacheStatus"] == "promoted_ready_page"
     assert payload["meta"]["readyCount"] == 0
+    assert payload["items"][0]["reader"]["bodyText"] == "body-0"
 
 
 def test_refresh_keeps_current_page_when_no_ready_page(monkeypatch, tmp_path: Path) -> None:
@@ -144,6 +201,13 @@ def test_refresh_keeps_current_page_when_no_ready_page(monkeypatch, tmp_path: Pa
         excerpt="excerpt",
         recommendation="must_read",
         tags=["AI"],
+        reader_payload={
+            "source": "zhihu",
+            "entityType": "answer",
+            "bodyText": "current body",
+            "transcriptText": "",
+            "comments": [],
+        },
     )
     store.save_current_page(cards=[current], meta={})
 
@@ -151,6 +215,166 @@ def test_refresh_keeps_current_page_when_no_ready_page(monkeypatch, tmp_path: Pa
 
     assert [item["id"] for item in payload["items"]] == ["zhihu:answer:1"]
     assert payload["meta"]["cacheStatus"] == "current_page"
+    assert payload["items"][0]["reader"]["bodyText"] == "current body"
+
+
+def test_get_push_page_payload_repairs_zhihu_question_reader(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = create_store(settings)
+
+    monkeypatch.setattr(
+        "stream_curator.push_service.get_worker_process_status",
+        lambda project_root: type("Status", (), {"running": False})(),
+    )
+    monkeypatch.setattr(
+        "stream_curator.push_service._rehydrate_card_reader_payload",
+        lambda **kwargs: {
+            "source": "zhihu",
+            "entityType": "question",
+            "sourceItemId": "1",
+            "canonicalUrl": "https://www.zhihu.com/question/1",
+            "title": "hot-question",
+            "authorName": "",
+            "publishedAt": None,
+            "topics": ["AI"],
+            "statsText": "",
+            "excerptText": "question excerpt",
+            "bodyText": "question body",
+            "transcriptText": "",
+            "contentBlocks": [],
+            "questionDetailBlocks": [],
+            "questionAnswers": [
+                {
+                    "answerId": "a1",
+                    "heading": "回答 1 · 测试作者",
+                    "authorName": "测试作者",
+                    "bodyText": "answer body",
+                    "excerptText": "answer excerpt",
+                    "contentBlocks": [{"type": "text", "text": "answer body"}],
+                    "commentCount": 2,
+                    "likeCount": 9,
+                    "canonicalUrl": "https://www.zhihu.com/answer/a1",
+                }
+            ],
+            "defaultAnswerId": "a1",
+            "commentSourceAnswerId": "a1",
+            "comments": [{"authorName": "Bob", "content": "solid", "likeCount": 3}],
+            "media": {},
+            "engagement": {},
+        },
+    )
+
+    from stream_curator.push_store import PushCard
+
+    store.save_current_page(
+        cards=[
+            PushCard(
+                item_uid="zhihu:question:1",
+                source="zhihu",
+                title="question title",
+                summary="summary",
+                reason="reason",
+                canonical_url="https://www.zhihu.com/question/1",
+                author_name="",
+                excerpt="excerpt",
+                recommendation="must_read",
+                tags=["AI"],
+                reader_payload={
+                    "source": "zhihu",
+                    "entityType": "question",
+                    "sourceItemId": "1",
+                    "canonicalUrl": "https://www.zhihu.com/question/1",
+                    "title": "question title",
+                    "authorName": "",
+                    "publishedAt": None,
+                    "topics": ["AI"],
+                    "statsText": "",
+                    "excerptText": "legacy excerpt",
+                    "bodyText": "legacy body",
+                    "transcriptText": "",
+                    "contentBlocks": [{"type": "text", "text": "回答 1 · 测试作者"}],
+                    "questionAnswers": [],
+                    "defaultAnswerId": "",
+                    "comments": [{"authorName": "Old", "content": "legacy", "likeCount": 1}],
+                    "media": {},
+                    "engagement": {},
+                },
+            )
+        ],
+        meta={},
+    )
+
+    payload = get_push_page_payload(settings=settings, ensure_current=False, limit=6)
+
+    assert payload["items"][0]["reader"]["defaultAnswerId"] == "a1"
+    assert payload["items"][0]["reader"]["questionAnswers"][0]["answerId"] == "a1"
+    assert payload["items"][0]["reader"]["comments"][0]["content"] == "solid"
+
+
+def test_get_push_page_payload_skips_legacy_bilibili_ready_page(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = create_store(settings)
+
+    monkeypatch.setattr(
+        "stream_curator.push_service.get_worker_process_status",
+        lambda project_root: type("Status", (), {"running": False})(),
+    )
+
+    from stream_curator.push_store import PushCard
+
+    legacy = PushCard(
+        item_uid="bilibili:video:legacy",
+        source="bilibili",
+        title="legacy",
+        summary="legacy summary",
+        reason="legacy reason",
+        canonical_url="https://www.bilibili.com/video/BVlegacy",
+        author_name="tester",
+        excerpt="legacy excerpt",
+        recommendation="must_read",
+        tags=["AI"],
+        reader_payload={
+            "source": "bilibili",
+            "entityType": "video",
+            "canonicalUrl": "https://www.bilibili.com/video/BVlegacy",
+            "media": {
+                "hasVideo": True,
+                "durationSeconds": 10,
+                "imageCount": None,
+            },
+        },
+    )
+    current = PushCard(
+        item_uid="bilibili:video:current",
+        source="bilibili",
+        title="current",
+        summary="current summary",
+        reason="current reason",
+        canonical_url="https://www.bilibili.com/video/BVcurrent",
+        author_name="tester",
+        excerpt="current excerpt",
+        recommendation="must_read",
+        tags=["AI"],
+        reader_payload={
+            "source": "bilibili",
+            "entityType": "video",
+            "canonicalUrl": "https://www.bilibili.com/video/BVcurrent",
+            "media": {
+                "hasVideo": True,
+                "durationSeconds": 10,
+                "aid": 123,
+                "cid": 456,
+                "pageNumber": 1,
+                "imageCount": None,
+            },
+        },
+    )
+    store.enqueue_ready_cards([legacy, current])
+
+    payload = get_push_page_payload(settings=settings, ensure_current=False, limit=1)
+
+    assert [item["id"] for item in payload["items"]] == ["bilibili:video:current"]
+    assert payload["meta"]["cacheStatus"] == "promoted_ready_page"
 
 
 def test_get_push_page_payload_can_fill_current_when_ensure_current(monkeypatch, tmp_path: Path) -> None:
@@ -164,7 +388,7 @@ def test_get_push_page_payload_can_fill_current_when_ensure_current(monkeypatch,
     candidate = _candidate("zhihu:answer:1", title="GPU training")
     monkeypatch.setattr(
         "stream_curator.push_service.collect_push_candidates",
-        lambda settings, source_limit=20: ([candidate], {"zhihu": 1}, {}),
+        lambda settings, source_limit=20, store=None: ([candidate], {"zhihu": 1}, {}),
     )
     monkeypatch.setattr(
         "stream_curator.push_service.PushLlmClient.select_push_cards",
@@ -173,9 +397,9 @@ def test_get_push_page_payload_can_fill_current_when_ensure_current(monkeypatch,
                 PushCardDraft(
                     item_uid=candidate.item_uid,
                     recommendation="must_read",
-                    summary="这条回答把训练资源、显存约束和调参思路放在一起讲清楚了。",
-                    reason="适合快速补课",
-                    tags=["AI", "训练"],
+                    summary="A valid Chinese summary should be returned here for the current page.",
+                    reason="Useful overview",
+                    tags=["AI", "Training"],
                     is_valid=True,
                 )
             ],
@@ -189,6 +413,7 @@ def test_get_push_page_payload_can_fill_current_when_ensure_current(monkeypatch,
 
     assert [item["id"] for item in payload["items"]] == [candidate.item_uid]
     assert payload["meta"]["cacheStatus"] == "filled_current_page"
+    assert payload["items"][0]["reader"]["bodyText"] == "GPU training full body"
 
 
 def test_collect_push_candidates_uses_hydrated_text_for_llm_input(monkeypatch, tmp_path: Path) -> None:
@@ -229,6 +454,7 @@ def test_collect_push_candidates_uses_hydrated_text_for_llm_input(monkeypatch, t
             "is_from_following": False,
             "is_ad_suspected": False,
         },
+        published_at=None,
     )
     hydrated = FeedItem(
         schema_version="1",
@@ -291,6 +517,9 @@ def test_collect_push_candidates_uses_hydrated_text_for_llm_input(monkeypatch, t
     assert candidates[0].excerpt.startswith("full hydrated body")
     assert "hydrated transcript" in candidates[0].excerpt
     assert "useful comment" in candidates[0].excerpt
+    assert candidates[0].reader_payload["bodyText"] == "full hydrated body"
+    assert candidates[0].reader_payload["transcriptText"] == "hydrated transcript"
+    assert candidates[0].reader_payload["comments"][0]["content"] == "useful comment"
 
 
 def test_collect_push_candidates_drops_item_when_hydrate_fails(monkeypatch, tmp_path: Path) -> None:
@@ -331,6 +560,7 @@ def test_collect_push_candidates_drops_item_when_hydrate_fails(monkeypatch, tmp_
             "is_from_following": False,
             "is_ad_suspected": False,
         },
+        published_at=None,
     )
 
     class _FailingHydrateConnector:
@@ -362,3 +592,97 @@ def test_collect_push_candidates_drops_item_when_hydrate_fails(monkeypatch, tmp_
     assert counts == {"bilibili": 0, "zhihu": 1, "xiaohongshu": 0}
     assert errors == {}
     assert candidates == []
+
+
+def test_collect_push_candidates_skips_xhs_captcha_round_and_cools_down(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    store = create_store(settings)
+    calls = {"xhs": 0}
+
+    class _CaptchaXhsConnector:
+        def __init__(self, runner, executable="stub"):
+            self.source = "xiaohongshu"
+
+        def collect_feed(self, **kwargs):
+            calls["xhs"] += 1
+            raise RuntimeError("Captcha triggered (count=1), cooling down 5s before raising")
+
+        def hydrate_item(self, item):
+            return item
+
+    class _EmptyConnector:
+        def __init__(self, runner, executable="stub"):
+            self.source = "empty"
+
+        def collect_feed(self, **kwargs):
+            return []
+
+        def hydrate_item(self, item):
+            return item
+
+    monkeypatch.setattr("stream_curator.push_service.BilibiliConnector", _EmptyConnector)
+    monkeypatch.setattr("stream_curator.push_service.ZhihuConnector", _EmptyConnector)
+    monkeypatch.setattr("stream_curator.push_service.XiaohongshuConnector", _CaptchaXhsConnector)
+
+    first_candidates, first_counts, first_errors = collect_push_candidates(
+        settings=settings,
+        source_limit=1,
+        store=store,
+    )
+    second_candidates, second_counts, second_errors = collect_push_candidates(
+        settings=settings,
+        source_limit=1,
+        store=store,
+    )
+
+    assert first_candidates == []
+    assert second_candidates == []
+    assert first_counts == {"bilibili": 0, "zhihu": 0, "xiaohongshu": 0}
+    assert second_counts == {"bilibili": 0, "zhihu": 0, "xiaohongshu": 0}
+    assert first_errors == {}
+    assert second_errors == {}
+    assert calls["xhs"] == 1
+    assert store.has_source_cooldown(source="xiaohongshu", action="feed") is True
+
+
+def test_collect_push_candidates_keeps_xhs_auth_error_visible(monkeypatch, tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    store = create_store(settings)
+
+    class _AuthFailXhsConnector:
+        def __init__(self, runner, executable="stub"):
+            self.source = "xiaohongshu"
+
+        def collect_feed(self, **kwargs):
+            raise RuntimeError("Session expired — please re-login with: xhs login")
+
+        def hydrate_item(self, item):
+            return item
+
+    class _EmptyConnector:
+        def __init__(self, runner, executable="stub"):
+            self.source = "empty"
+
+        def collect_feed(self, **kwargs):
+            return []
+
+        def hydrate_item(self, item):
+            return item
+
+    monkeypatch.setattr("stream_curator.push_service.BilibiliConnector", _EmptyConnector)
+    monkeypatch.setattr("stream_curator.push_service.ZhihuConnector", _EmptyConnector)
+    monkeypatch.setattr("stream_curator.push_service.XiaohongshuConnector", _AuthFailXhsConnector)
+
+    candidates, counts, errors = collect_push_candidates(
+        settings=settings,
+        source_limit=1,
+        store=store,
+    )
+
+    assert candidates == []
+    assert counts == {"bilibili": 0, "zhihu": 0, "xiaohongshu": 0}
+    assert "xiaohongshu" in errors
+    assert "re-login" in errors["xiaohongshu"]
+    assert store.has_source_cooldown(source="xiaohongshu", action="feed") is False

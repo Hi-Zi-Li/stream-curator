@@ -6,22 +6,29 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .config import Settings
+from .connectors.base import CollectedItem
 from .connectors.bilibili import BilibiliConnector
 from .connectors.subprocess import SubprocessRunner
 from .connectors.xiaohongshu import XiaohongshuConnector
 from .connectors.zhihu import ZhihuConnector
+from .models.feed_item import FeedAuthor, FeedComment, FeedItem
 from .push_llm import PushCandidate, PushLlmClient, PushSelectionResult
 from .push_store import PushCard, PushPage, PushStore
 from .worker_process import get_worker_process_status
 
 PUSH_CARD_COUNT = 6
-READY_CARD_TARGET = 18
+READY_CARD_TARGET = 24
+HYDRATED_POOL_TARGET = 100
+HYDRATED_SELECT_BATCH_SIZE = 24
 SOURCE_LIMIT = 20
 SELECT_LIMIT = 10
 GENERATION_LOCK_SECONDS = 600
+HYDRATE_PARALLELISM = 6
+XHS_FEED_COOLDOWN_SECONDS = 60
 
 
 @dataclass(slots=True)
@@ -54,6 +61,9 @@ def get_push_page_payload(
 ) -> dict[str, Any]:
     store = create_store(settings)
     page = store.load_current_page()
+    if page is not None and not _page_has_reader_payload(page):
+        store.clear_current_page()
+        page = None
     cache_status = "current_page" if page else "empty"
 
     if page is None:
@@ -71,6 +81,8 @@ def get_push_page_payload(
             if page is None:
                 page = _promote_ready_page(store=store, limit=limit)
             cache_status = "filled_current_page" if page else "empty"
+    if page is not None:
+        page = _backfill_page_reader_media(settings=settings, store=store, page=page)
 
     worker_status = get_worker_process_status(project_root=settings.project_root)
     return _build_page_payload(
@@ -93,8 +105,13 @@ def refresh_push_page_payload(
     cache_status = "refreshed_ready_page" if page else "current_page"
     if page is None:
         page = store.load_current_page()
+        if page is not None and not _page_has_reader_payload(page):
+            store.clear_current_page()
+            page = None
         if page is None:
             cache_status = "empty"
+    if page is not None:
+        page = _backfill_page_reader_media(settings=settings, store=store, page=page)
 
     worker_status = get_worker_process_status(project_root=settings.project_root)
     return _build_page_payload(
@@ -137,19 +154,26 @@ def fill_ready_queue_once(
         )
 
     try:
+        source_counts: dict[str, int] = {}
+        source_errors: dict[str, str] = {}
         previous_retry = _candidates_from_payload(active_store.load_retry_candidates())
-        fresh_candidates, source_counts, source_errors = collect_push_candidates(
-            settings=settings,
-            source_limit=source_limit,
+        pool_candidates = active_store.pop_hydrated_candidates(limit=HYDRATED_SELECT_BATCH_SIZE)
+        final_candidates = _filter_ready_candidates(
+            store=active_store,
+            candidates=previous_retry + pool_candidates,
         )
-        merged_candidates = previous_retry + fresh_candidates
-        deduped_candidates = _dedupe_candidates(merged_candidates)
-        active_item_uids = active_store.list_active_item_uids()
-        final_candidates = [
-            candidate
-            for candidate in deduped_candidates
-            if candidate.item_uid not in active_item_uids and candidate.canonical_url
-        ]
+
+        if not final_candidates:
+            _, source_counts, source_errors = fill_hydrated_pool_once(
+                settings=settings,
+                store=active_store,
+                source_limit=source_limit,
+            )
+            pool_candidates = active_store.pop_hydrated_candidates(limit=HYDRATED_SELECT_BATCH_SIZE)
+            final_candidates = _filter_ready_candidates(
+                store=active_store,
+                candidates=previous_retry + pool_candidates,
+            )
 
         if not final_candidates:
             active_store.save_retry_candidates([])
@@ -196,6 +220,13 @@ def fill_ready_queue_once(
             candidates=final_candidates,
             selection=selection,
         )
+        selected_uids = {draft.item_uid for draft in selection.cards}
+        recycled_candidates = [
+            candidate
+            for candidate in final_candidates
+            if candidate.item_uid not in selected_uids
+        ]
+        active_store.enqueue_hydrated_candidates(recycled_candidates)
         enqueued_count = active_store.enqueue_ready_cards(valid_cards)
         active_store.save_retry_candidates([_candidate_to_payload(candidate) for candidate in retry_candidates])
         active_store.save_last_fill_meta(
@@ -229,49 +260,189 @@ def fill_ready_queue_once(
         active_store.release_lock(lock_name="push_generation", owner=owner)
 
 
+def fill_hydrated_pool_once(
+    *,
+    settings: Settings,
+    store: PushStore,
+    source_limit: int = SOURCE_LIMIT,
+) -> tuple[int, dict[str, int], dict[str, str]]:
+    remaining_slots = max(0, HYDRATED_POOL_TARGET - store.count_hydrated_candidates())
+    if remaining_slots <= 0:
+        return 0, {}, {}
+    fresh_candidates, source_counts, source_errors = collect_push_candidates(
+        settings=settings,
+        source_limit=source_limit,
+        store=store,
+    )
+    deduped_candidates = _dedupe_candidates(fresh_candidates)
+    active_item_uids = store.list_active_item_uids()
+    final_candidates = [
+        candidate
+        for candidate in deduped_candidates
+        if candidate.item_uid not in active_item_uids and candidate.canonical_url
+    ]
+    inserted = store.enqueue_hydrated_candidates(final_candidates[:remaining_slots])
+    return inserted, source_counts, source_errors
+
+
+def _filter_ready_candidates(*, store: PushStore, candidates: list[PushCandidate]) -> list[PushCandidate]:
+    deduped_candidates = _dedupe_candidates(candidates)
+    active_item_uids = store.list_active_item_uids()
+    return [
+        candidate
+        for candidate in deduped_candidates
+        if candidate.item_uid not in active_item_uids and candidate.canonical_url
+    ]
+
+
 def collect_push_candidates(
     *,
     settings: Settings,
     source_limit: int = SOURCE_LIMIT,
+    store: PushStore | None = None,
 ) -> tuple[list[PushCandidate], dict[str, int], dict[str, str]]:
-    runner = SubprocessRunner()
-    connectors = {
-        "bilibili": BilibiliConnector(runner, executable=settings.bilibili_executable),
-        "zhihu": ZhihuConnector(runner, executable=settings.zhihu_executable),
-        "xiaohongshu": XiaohongshuConnector(runner, executable=settings.xiaohongshu_executable),
-    }
-
+    connector_specs = [
+        ("bilibili", BilibiliConnector, settings.bilibili_executable),
+        ("zhihu", ZhihuConnector, settings.zhihu_executable),
+        ("xiaohongshu", XiaohongshuConnector, settings.xiaohongshu_executable),
+    ]
     candidates: list[PushCandidate] = []
     source_counts: dict[str, int] = {}
     source_errors: dict[str, str] = {}
-    for source_name, connector in connectors.items():
-        try:
-            collected = connector.collect_feed(limit=source_limit)
-        except Exception as exc:
-            source_counts[source_name] = 0
-            source_errors[source_name] = _clean_text(exc)
+    hydrate_jobs: list[tuple[str, type[Any], str, CollectedItem]] = []
+    for source_name, connector_cls, executable in connector_specs:
+        source_name, collected, source_count, source_error = _collect_source_items(
+            source_name=source_name,
+            connector_cls=connector_cls,
+            executable=executable,
+            source_limit=source_limit,
+            store=store,
+        )
+        source_counts[source_name] = source_count
+        if source_error:
+            source_errors[source_name] = source_error
             continue
+        hydrate_jobs.extend(
+            (source_name, connector_cls, executable, entry)
+            for entry in collected
+        )
 
-        source_counts[source_name] = len(collected)
-        for entry in collected:
-            try:
-                hydrated_entry = connector.hydrate_item(entry)
-            except Exception:
-                continue
-            item = hydrated_entry.feed_item
-            title = _clean_text(item.title) or f"{_source_label(item.source)}未命名内容"
-            candidates.append(
-                PushCandidate(
-                    item_uid=item.item_uid,
-                    source=item.source,
-                    title=title,
-                    author_name=_clean_text(item.author.name),
-                    canonical_url=_clean_text(item.canonical_url),
-                    excerpt=_choose_excerpt(item.to_dict()),
-                    stats_text=_stats_text(item.source, item.to_dict()),
-                )
+    if not hydrate_jobs:
+        return candidates, source_counts, source_errors
+
+    with ThreadPoolExecutor(max_workers=min(HYDRATE_PARALLELISM, len(hydrate_jobs))) as executor:
+        futures = [
+            executor.submit(
+                _hydrate_candidate_entry,
+                source_name=source_name,
+                connector_cls=connector_cls,
+                executable=executable,
+                entry=entry,
             )
+            for source_name, connector_cls, executable, entry in hydrate_jobs
+        ]
+        for future in as_completed(futures):
+            candidate = future.result()
+            if candidate is not None:
+                candidates.append(candidate)
     return candidates, source_counts, source_errors
+
+
+def _collect_source_items(
+    *,
+    source_name: str,
+    connector_cls: type[Any],
+    executable: str,
+    source_limit: int,
+    store: PushStore | None = None,
+) -> tuple[str, list[CollectedItem], int, str | None]:
+    if _should_skip_source_feed(store=store, source_name=source_name):
+        return source_name, [], 0, None
+    runner = SubprocessRunner()
+    connector = connector_cls(runner, executable=executable)
+    try:
+        collected = connector.collect_feed(limit=source_limit)
+    except Exception as exc:
+        error_text = _clean_text(exc)
+        if _mark_source_feed_cooldown(
+            store=store,
+            source_name=source_name,
+            error_text=error_text,
+        ):
+            return source_name, [], 0, None
+        return source_name, [], 0, error_text
+    _clear_source_feed_cooldown(store=store, source_name=source_name)
+    return source_name, collected, len(collected), None
+
+
+def _should_skip_source_feed(*, store: PushStore | None, source_name: str) -> bool:
+    if store is None:
+        return False
+    return store.has_source_cooldown(source=source_name, action="feed")
+
+
+def _mark_source_feed_cooldown(
+    *,
+    store: PushStore | None,
+    source_name: str,
+    error_text: str,
+) -> bool:
+    if store is None or not _is_xhs_transient_feed_error(source_name=source_name, error_text=error_text):
+        return False
+    store.set_source_cooldown(
+        source=source_name,
+        action="feed",
+        seconds=XHS_FEED_COOLDOWN_SECONDS,
+    )
+    return True
+
+
+def _clear_source_feed_cooldown(*, store: PushStore | None, source_name: str) -> None:
+    if store is None:
+        return
+    store.clear_source_cooldown(source=source_name, action="feed")
+
+
+def _is_xhs_transient_feed_error(*, source_name: str, error_text: str) -> bool:
+    if source_name != "xiaohongshu":
+        return False
+    lowered = error_text.lower()
+    needles = (
+        "captcha triggered",
+        "cooling down",
+        "risk control",
+        "verify",
+        "验证码",
+        "风控",
+    )
+    return any(needle in lowered or needle in error_text for needle in needles)
+
+
+def _hydrate_candidate_entry(
+    *,
+    source_name: str,
+    connector_cls: type[Any],
+    executable: str,
+    entry: CollectedItem,
+) -> PushCandidate | None:
+    runner = SubprocessRunner()
+    connector = connector_cls(runner, executable=executable)
+    try:
+        hydrated_entry = connector.hydrate_item(entry)
+    except Exception:
+        return None
+    item = hydrated_entry.feed_item
+    title = _clean_text(item.title) or f"{_source_label(item.source)}未命名内容"
+    return PushCandidate(
+        item_uid=item.item_uid,
+        source=item.source,
+        title=title,
+        author_name=_clean_text(item.author.name),
+        canonical_url=_clean_text(item.canonical_url),
+        excerpt=_choose_excerpt(item.to_dict()),
+        stats_text=_stats_text(item.source, item.to_dict()),
+        reader_payload=_build_reader_payload(item),
+    )
 
 
 def _fill_ready_queue_until(
@@ -297,15 +468,22 @@ def _fill_ready_queue_until(
 
 def _promote_ready_page(*, store: PushStore, limit: int) -> PushPage | None:
     meta = store.load_last_fill_meta()
-    return store.promote_next_ready_page(
-        limit=limit,
-        meta={
-            "provider": meta.get("provider"),
-            "model": meta.get("model"),
-            "sourceCounts": meta.get("sourceCounts", {}),
-            "sourceErrors": meta.get("sourceErrors", {}),
-        },
-    )
+    for _ in range(3):
+        page = store.promote_next_ready_page(
+            limit=limit,
+            meta={
+                "provider": meta.get("provider"),
+                "model": meta.get("model"),
+                "sourceCounts": meta.get("sourceCounts", {}),
+                "sourceErrors": meta.get("sourceErrors", {}),
+            },
+        )
+        if page is None:
+            return None
+        if _page_has_reader_payload(page):
+            return page
+        store.clear_current_page()
+    return None
 
 
 def _build_page_payload(
@@ -346,6 +524,49 @@ def _build_page_payload(
     }
 
 
+def _backfill_page_reader_media(
+    *,
+    settings: Settings,
+    store: PushStore,
+    page: PushPage,
+) -> PushPage:
+    changed = False
+    for card in page.cards:
+        if not _needs_reader_media_backfill(card):
+            continue
+        payload = _rehydrate_card_reader_payload(settings=settings, card=card)
+        if not payload:
+            continue
+        card.reader_payload = payload
+        changed = True
+    if changed:
+        store.replace_current_page(page)
+    return page
+
+
+def repair_cached_reader_payloads(
+    *,
+    settings: Settings,
+    store: PushStore,
+    ready_limit: int = READY_CARD_TARGET,
+) -> None:
+    current_page = store.load_current_page()
+    if current_page is not None:
+        _backfill_page_reader_media(settings=settings, store=store, page=current_page)
+
+    for card in store.peek_ready_cards(limit=max(0, ready_limit)):
+        if not _needs_reader_media_backfill(card):
+            continue
+        try:
+            payload = _rehydrate_card_reader_payload(settings=settings, card=card)
+        except Exception:
+            continue
+        if not payload:
+            continue
+        card.reader_payload = payload
+        store.replace_ready_card(card)
+
+
 def _card_to_client_item(card: PushCard, *, updated_at: str | None) -> dict[str, Any]:
     level_map = {
         "must_read": ("必读", "must-read"),
@@ -375,10 +596,112 @@ def _card_to_client_item(card: PushCard, *, updated_at: str | None) -> dict[str,
         "updatedAt": _format_clock(updated_at),
         "updatedAtIso": updated_at,
         "canonicalUrl": card.canonical_url,
+        "reader": card.reader_payload,
         "structured": {
             "sections": sections,
         },
     }
+
+
+def _needs_reader_media_backfill(card: PushCard) -> bool:
+    if card.source not in {"zhihu", "xiaohongshu"}:
+        return False
+    payload = card.reader_payload if isinstance(card.reader_payload, dict) else {}
+    if card.source == "zhihu":
+        if _needs_zhihu_question_reader_backfill(payload):
+            return True
+        content_blocks = payload.get("contentBlocks")
+        body_text = str(payload.get("bodyText", "")).strip()
+        excerpt_text = str(payload.get("excerptText", "")).strip()
+        if (not isinstance(content_blocks, list) or not content_blocks) and not body_text and not excerpt_text:
+            return True
+    media = payload.get("media", {}) if isinstance(payload.get("media"), dict) else {}
+    image_count = _safe_int(media.get("imageCount")) or 0
+    images = media.get("images")
+    return image_count > 0 and (not isinstance(images, list) or not images)
+
+
+def _needs_zhihu_question_reader_backfill(payload: dict[str, Any]) -> bool:
+    if str(payload.get("entityType", "")).strip() != "question":
+        return False
+
+    answers = payload.get("questionAnswers")
+    if not isinstance(answers, list) or not answers:
+        return True
+
+    default_answer_id = str(payload.get("defaultAnswerId", "")).strip()
+    if not default_answer_id:
+        return True
+
+    body_text = str(payload.get("bodyText", "")).strip()
+    comments = payload.get("comments", [])
+    return not body_text or not isinstance(comments, list) or len(comments) == 0
+
+
+def _rehydrate_card_reader_payload(*, settings: Settings, card: PushCard) -> dict[str, Any] | None:
+    connector = _reader_backfill_connector(settings=settings, source=card.source)
+    if connector is None:
+        return None
+
+    payload = card.reader_payload if isinstance(card.reader_payload, dict) else {}
+    media = payload.get("media", {}) if isinstance(payload.get("media"), dict) else {}
+    engagement = payload.get("engagement", {}) if isinstance(payload.get("engagement"), dict) else {}
+    comments = payload.get("comments", []) if isinstance(payload.get("comments"), list) else []
+    fallback_item = FeedItem(
+        schema_version="1",
+        item_uid=card.item_uid,
+        source=card.source,
+        entity_type=str(payload.get("entityType", "")).strip() or _entity_type_from_item_uid(card.item_uid),
+        source_item_id=str(payload.get("sourceItemId", "")).strip() or _source_item_id_from_item_uid(card.item_uid),
+        canonical_url=card.canonical_url,
+        collection_channel="feed",
+        title=card.title,
+        author=FeedAuthor(id=None, name=str(payload.get("authorName", "")).strip() or card.author_name),
+        collected_at=datetime.now(tz=UTC).isoformat(),
+        lang="zh-CN",
+        excerpt_text=str(payload.get("excerptText", "")).strip(),
+        body_text=str(payload.get("bodyText", "")).strip(),
+        transcript_text=str(payload.get("transcriptText", "")).strip(),
+        top_comments=[
+            FeedComment(
+                author_name=str(comment.get("authorName", "")).strip() or "Anonymous",
+                content=str(comment.get("content", "")).strip(),
+                like_count=_safe_int(comment.get("likeCount")),
+            )
+            for comment in comments
+            if isinstance(comment, dict)
+        ],
+        topics=[str(topic).strip() for topic in payload.get("topics", []) if str(topic).strip()]
+        if isinstance(payload.get("topics"), list)
+        else [],
+        engagement={
+            "view_count": _safe_int(engagement.get("view_count")),
+            "like_count": _safe_int(engagement.get("like_count")),
+            "comment_count": _safe_int(engagement.get("comment_count")),
+            "share_count": _safe_int(engagement.get("share_count")),
+            "favorite_count": _safe_int(engagement.get("favorite_count")),
+            "voteup_count": _safe_int(engagement.get("voteup_count")),
+            "coin_count": _safe_int(engagement.get("coin_count")),
+            "danmaku_count": _safe_int(engagement.get("danmaku_count")),
+        },
+        media={
+            "has_video": bool(media.get("hasVideo")),
+            "duration_seconds": _safe_int(media.get("durationSeconds")),
+            "aid": _safe_int(media.get("aid")),
+            "cid": _safe_int(media.get("cid")),
+            "page_number": _safe_int(media.get("pageNumber")) or 1,
+            "image_count": _safe_int(media.get("imageCount")),
+            "image_urls": _media_urls(media.get("images")),
+            "content_blocks": _reader_content_blocks(payload.get("contentBlocks")),
+        },
+        quality_flags={},
+        query_text=None,
+        published_at=str(payload.get("publishedAt", "")).strip() or None,
+    )
+    hydrated = connector.hydrate_item(
+        CollectedItem(rank_in_batch=None, raw_payload={}, feed_item=fallback_item)
+    )
+    return _build_reader_payload(hydrated.feed_item)
 
 
 def _split_selection(
@@ -407,6 +730,7 @@ def _split_selection(
                     excerpt=_clean_text(candidate.excerpt),
                     recommendation=draft.recommendation,
                     tags=[_clean_text(tag) for tag in draft.tags if _clean_text(tag)][:3],
+                    reader_payload=candidate.reader_payload,
                 )
             )
             continue
@@ -425,6 +749,7 @@ def _candidate_to_payload(candidate: PushCandidate) -> dict[str, Any]:
         "canonical_url": candidate.canonical_url,
         "excerpt": candidate.excerpt,
         "stats_text": candidate.stats_text,
+        "reader_payload": candidate.reader_payload,
     }
 
 
@@ -444,9 +769,148 @@ def _candidates_from_payload(payload: list[dict[str, Any]]) -> list[PushCandidat
                 canonical_url=canonical_url,
                 excerpt=_clean_text(entry.get("excerpt")),
                 stats_text=_clean_text(entry.get("stats_text")),
+                reader_payload=entry.get("reader_payload", {})
+                if isinstance(entry.get("reader_payload"), dict)
+                else {},
             )
         )
     return candidates
+
+
+def _build_reader_payload(item: FeedItem) -> dict[str, Any]:
+    return {
+        "source": item.source,
+        "entityType": item.entity_type,
+        "sourceItemId": item.source_item_id,
+        "canonicalUrl": item.canonical_url,
+        "title": item.title,
+        "authorName": item.author.name,
+        "publishedAt": item.published_at,
+        "topics": [topic for topic in item.topics if topic][:8],
+        "statsText": _stats_text(item.source, item.to_dict()),
+        "excerptText": _reader_text(item.excerpt_text),
+        "bodyText": _reader_text(item.body_text),
+        "transcriptText": _reader_text(item.transcript_text),
+        "contentBlocks": _reader_content_blocks(item.media.get("content_blocks")),
+        "questionDetailBlocks": _reader_content_blocks(item.media.get("question_detail_blocks")),
+        "questionAnswers": _reader_question_answers(item.media.get("answer_sections")),
+        "defaultAnswerId": str(item.media.get("default_answer_id", "")).strip(),
+        "commentSourceAnswerId": str(item.media.get("comment_answer_id", "")).strip(),
+        "comments": [_comment_to_reader_payload(comment) for comment in item.top_comments[:5]],
+        "media": {
+            "hasVideo": bool(item.media.get("has_video")),
+            "durationSeconds": _safe_int(item.media.get("duration_seconds")),
+            "aid": _safe_int(item.media.get("aid")),
+            "cid": _safe_int(item.media.get("cid")),
+            "pageNumber": _safe_int(item.media.get("page_number")) or 1,
+            "imageCount": _safe_int(item.media.get("image_count")),
+            "images": _media_urls(item.media.get("image_urls")),
+        },
+        "engagement": {
+            key: _safe_int(value)
+            for key, value in item.engagement.items()
+        },
+    }
+
+
+def _comment_to_reader_payload(comment: FeedComment) -> dict[str, Any]:
+    return {
+        "authorName": comment.author_name,
+        "content": _reader_text(comment.content),
+        "likeCount": _safe_int(comment.like_count),
+    }
+
+
+def _media_urls(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    urls: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    return urls
+
+
+def _reader_content_blocks(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    blocks: list[dict[str, str]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        block_type = str(entry.get("type", "")).strip()
+        if block_type == "text":
+            text = _reader_text(entry.get("text"))
+            if text:
+                blocks.append({"type": "text", "text": text})
+            continue
+        if block_type == "image":
+            url = str(entry.get("url", "")).strip()
+            if url:
+                blocks.append({"type": "image", "url": url})
+    return blocks
+
+
+def _reader_question_answers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    answers: list[dict[str, Any]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        answer_id = str(entry.get("answer_id", "")).strip()
+        heading = _reader_text(entry.get("heading"))
+        if not answer_id and not heading:
+            continue
+        answers.append(
+            {
+                "answerId": answer_id,
+                "heading": heading,
+                "authorName": _reader_text(entry.get("author_name")),
+                "bodyText": _reader_text(entry.get("body")),
+                "excerptText": _reader_text(entry.get("excerpt")),
+                "contentBlocks": _reader_content_blocks(entry.get("content_blocks")),
+                "commentCount": _safe_int(entry.get("comment_count")),
+                "likeCount": _safe_int(entry.get("like_count")),
+                "canonicalUrl": str(entry.get("canonical_url", "")).strip(),
+            }
+        )
+    return answers
+
+
+def _reader_backfill_connector(*, settings: Settings, source: str) -> ZhihuConnector | XiaohongshuConnector | None:
+    runner = SubprocessRunner()
+    if source == "zhihu":
+        return ZhihuConnector(runner, executable=settings.zhihu_executable)
+    if source == "xiaohongshu":
+        return XiaohongshuConnector(runner, executable=settings.xiaohongshu_executable)
+    return None
+
+
+def _entity_type_from_item_uid(item_uid: str) -> str:
+    parts = str(item_uid).split(":")
+    return parts[1] if len(parts) >= 3 else ""
+
+
+def _source_item_id_from_item_uid(item_uid: str) -> str:
+    parts = str(item_uid).split(":")
+    return ":".join(parts[2:]) if len(parts) >= 3 else ""
+
+
+def _page_has_reader_payload(page: PushPage) -> bool:
+    return all(_card_has_current_reader_payload(card) for card in page.cards)
+
+
+def _card_has_current_reader_payload(card: PushCard) -> bool:
+    payload = card.reader_payload if isinstance(card.reader_payload, dict) else {}
+    if not payload:
+        return False
+    if card.source != "bilibili":
+        return True
+
+    media = payload.get("media", {}) if isinstance(payload.get("media"), dict) else {}
+    return _safe_int(media.get("cid")) is not None
 
 
 def _dedupe_candidates(candidates: list[PushCandidate]) -> list[PushCandidate]:
@@ -554,6 +1018,19 @@ def _source_label(source: str) -> str:
         "zhihu": "知乎",
         "xiaohongshu": "小红书",
     }.get(source, source)
+
+
+def _reader_text(value: object) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _safe_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _clean_text(value: object) -> str:

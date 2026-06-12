@@ -122,3 +122,19 @@ def test_worker_process_stop_terminates_running_pid(
     assert kill_calls == [(24680, False)]
     assert paths.state_path.exists() is False
     assert result.status.running is False
+
+
+def test_worker_environment_prefers_source_root_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "bundle"
+    (source_root / "src").mkdir(parents=True)
+    monkeypatch.setenv("STREAM_CURATOR_SOURCE_ROOT", str(source_root))
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    env = worker_process._worker_environment(tmp_path)
+
+    assert env["STREAM_CURATOR_PROJECT_ROOT"] == str(tmp_path)
+    assert env["STREAM_CURATOR_SOURCE_ROOT"] == str(source_root)
+    assert env["PYTHONPATH"] == str(source_root / "src")
