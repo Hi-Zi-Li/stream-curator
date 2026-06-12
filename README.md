@@ -269,7 +269,6 @@ npm run build:release
 - 精简后的 Python runtime
 - `stream-curator` 源码
 - 三个上游 CLI 的可执行包装
-- 应用图标和 exe 图标
 
 解压后直接运行 `stream-curator.exe` 即可。  
 外部仍需你自己提供有效的登录状态和 LLM 配置。
@@ -314,4 +313,3 @@ pytest
 
 - `third-party/@...` 下的三个子模块不自动并入本仓库许可证
 - 它们仍然分别遵循各自仓库的许可证
-- 当前这三个 submodule 以各自仓库中的许可证文件为准
