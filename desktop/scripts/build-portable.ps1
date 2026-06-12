@@ -11,6 +11,7 @@ $packageJsonPath = Join-Path $desktopDir "package.json"
 $packageJson = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
 $setExeIconScript = Join-Path $PSScriptRoot "set-exe-icon.mjs"
 $sourceIconPath = Join-Path $desktopDir "assets\app-icon.ico"
+$repoLicensePath = Join-Path $repoRoot "LICENSE"
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $desktopDir "dist\stream-curator-win32-x64"
@@ -75,6 +76,10 @@ if (Test-Path -LiteralPath (Join-Path $desktopDir "assets")) {
 }
 Copy-Item -LiteralPath (Join-Path $desktopDir "main.js") -Destination (Join-Path $appDesktopDir "main.js") -Force
 Copy-Item -LiteralPath (Join-Path $desktopDir "preload.js") -Destination (Join-Path $appDesktopDir "preload.js") -Force
+if (Test-Path -LiteralPath $repoLicensePath) {
+    Copy-Item -LiteralPath $repoLicensePath -Destination (Join-Path $outputRoot "LICENSE.stream-curator.txt") -Force
+    Copy-Item -LiteralPath $repoLicensePath -Destination (Join-Path $appRoot "LICENSE.stream-curator.txt") -Force
+}
 
 Get-ChildItem -Path $appRoot -Recurse -Directory | Where-Object { $_.Name -eq "__pycache__" } | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Recurse -Force
@@ -100,6 +105,10 @@ $readmeLines = @(
     "- Python 3.11 environment with stream-curator installed or PYTHONPATH pointed to bundled src",
     "- bili.exe / zhihu.exe / xhs.exe available, or set STREAM_CURATOR_*_EXECUTABLE env vars",
     "- OPENCODE_API_KEY in the environment",
+    "",
+    "Included licenses:",
+    "- LICENSE = Electron runtime",
+    "- LICENSE.stream-curator.txt = stream-curator",
     "",
     "Optional overrides:",
     "- STREAM_CURATOR_PYTHON_EXECUTABLE",

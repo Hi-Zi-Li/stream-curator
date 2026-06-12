@@ -51,6 +51,15 @@
 
 ![搜索页](examples/search.png)
 
+
+## Issues / PRs
+
+Welcome and feel free to add issues and PRs.
+
+- bug、回归、打包问题欢迎直接随意提 issue
+- UI / 交互 / 阅读体验等问题和改进欢迎直接提 issue 或者 PR
+- 新平台接入、抓取修复、性能优化以及其他改进欢迎发 PR
+
 ## 仓库结构
 
 ```text
