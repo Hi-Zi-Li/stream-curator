@@ -274,6 +274,22 @@ npm run build:release
 解压后直接运行 `stream-curator.exe` 即可。  
 外部仍需你自己提供有效的登录状态和 LLM 配置。
 
+## 测试
+
+当前测试只保留仍然和现有功能对应的部分，主要覆盖：
+
+- connector 映射
+- push / hot / search 核心服务
+- SQLite 存储
+- worker 进程状态
+- 阅读页评论分页
+
+运行：
+
+```powershell
+pytest
+```
+
 ## 当前依赖的上游项目
 
 `stream-curator` 依赖三套独立 CLI 做抓取与登录态承载：
@@ -294,30 +310,8 @@ npm run build:release
 
 本仓库主代码使用 [Apache License 2.0](LICENSE)。
 
-我这里选 `Apache-2.0`，而不是 `MIT`，主要是因为：
-
-- 它是标准开源许可证，传播成本低，比自定义非商用条款更适合公开仓库
-- 它和当前三个上游 CLI fork 的许可证风格一致，组合起来更干净
-- 它比 `MIT` 多了明确的专利授权和再分发要求，适合这种桌面客户端 + 包装脚本 + 多仓库拼装的项目
-
 注意：
 
 - `third-party/@...` 下的三个子模块不自动并入本仓库许可证
 - 它们仍然分别遵循各自仓库的许可证
-- 当前这三个 submodule 也都是 Apache-2.0，但仍应以各自仓库中的许可证文件为准
-
-## 测试
-
-当前测试只保留仍然和现有功能对应的部分，主要覆盖：
-
-- connector 映射
-- push / hot / search 核心服务
-- SQLite 存储
-- worker 进程状态
-- 阅读页评论分页
-
-运行：
-
-```powershell
-pytest
-```
+- 当前这三个 submodule 以各自仓库中的许可证文件为准
